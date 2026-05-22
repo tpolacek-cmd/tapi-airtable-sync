@@ -64,17 +64,21 @@ def airtable_get_all(table_id: str, fields: list[str]) -> list[dict]:
 
 
 def supabase_upsert(table: str, rows: list[dict]) -> int:
-    """Hace upsert en Supabase. Devuelve cantidad de filas procesadas."""
+    """Hace upsert en Supabase usando airtable_id como clave. Devuelve cantidad de filas procesadas."""
     if not rows:
         return 0
 
-    # Supabase acepta hasta 1000 filas por request
+    # Supabase upsert: POST con ?on_conflict=airtable_id y Prefer: resolution=merge-duplicates
     BATCH = 500
     total = 0
+    headers = {
+        **SUPABASE_HEADERS,
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
     for i in range(0, len(rows), BATCH):
         batch = rows[i : i + BATCH]
-        url  = f"{SUPABASE_URL}/rest/v1/{table}"
-        resp = requests.post(url, headers=SUPABASE_HEADERS, json=batch)
+        url  = f"{SUPABASE_URL}/rest/v1/{table}?on_conflict=airtable_id"
+        resp = requests.post(url, headers=headers, json=batch)
         if resp.status_code not in (200, 201):
             log.error(f"  Supabase error en {table}: {resp.status_code} {resp.text[:300]}")
             resp.raise_for_status()
