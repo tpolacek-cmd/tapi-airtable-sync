@@ -65,13 +65,22 @@ def airtable_get_all(table_id: str, fields: list[str]) -> list[dict]:
 
 def supabase_delete_all(table: str) -> None:
     """Borra todos los registros de la tabla antes de reinsertar."""
-    url  = f"{SUPABASE_URL}/rest/v1/{table}?airtable_id=neq.null"
-    headers = {**SUPABASE_HEADERS, "Prefer": "return=minimal"}
-    resp = requests.delete(url, headers=headers)
+    # PostgREST: IS NOT NULL = not.is.null  (neq.null compara contra el string "null")
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    headers = {
+        "apikey":        SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type":  "application/json",
+        "Prefer":        "return=minimal,count=exact",
+    }
+    params = {"airtable_id": "not.is.null"}
+    log.info(f"  [DELETE] {table} WHERE airtable_id IS NOT NULL ...")
+    resp = requests.delete(url, headers=headers, params=params)
+    log.info(f"  [DELETE] status={resp.status_code} | Content-Range: {resp.headers.get('Content-Range', 'n/a')}")
     if resp.status_code not in (200, 204):
-        log.error(f"  Supabase delete error en {table}: {resp.status_code} {resp.text[:200]}")
+        log.error(f"  Supabase delete error en {table}: {resp.status_code} {resp.text[:300]}")
         resp.raise_for_status()
-    log.info(f"  Supabase {table}: registros anteriores borrados")
+    log.info(f"  [DELETE] {table}: OK")
 
 
 def supabase_insert(table: str, rows: list[dict]) -> int:
