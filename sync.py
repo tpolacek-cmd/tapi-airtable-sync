@@ -219,19 +219,18 @@ def build_cliente_map() -> dict[str, str]:
 def sync_contactos(cliente_map: dict[str, str]) -> int:
     log.info("── Sync contactos ──")
 
+    # Usando nombres de campos — confirmado con API
     fields = [
-        "fld8nAMWfKfipMgv8",  # Nombre
-        "fldaHcADHxSUcw1Rr",  # Apellido
-        "fldmXti9SGuGbJzG8",  # Correo
-        "fldI77R8ZfWirYcaW",  # Número de teléfono
-        "fldL4YpgoTrg05o6S",  # Rol
-        "fldZFEk1ZJGrv9fVp",  # Vertical
-        "fldJ5nbAQ0jt8YxZp",  # Pais
-        "fld6awZ2suNeeFDCg",  # Tipo
-        "fld1SvyIEiwlfy7N5",  # Rating Persona
-        "fldjcu0hTbdheUxWl",  # Categoría Marketing
-        "fldl0r9btzeqLybTE",  # Notas
-        "fldYIs7UO4L95I35B",  # Clientes (linked record)
+        "Nombre",
+        "Apellido",
+        "Correo",
+        "Número de teléfono",
+        "Rol",
+        "Vertical",
+        "País",
+        "Tipo",
+        "Notas",
+        "Clientes",   # linked record a bizdev_clientes
     ]
     records = airtable_get_all(TABLE_CONTACTOS, fields)
 
@@ -239,27 +238,23 @@ def sync_contactos(cliente_map: dict[str, str]) -> int:
     for r in records:
         f = r.get("fields", {})
 
-        clientes_linked     = f.get("fldYIs7UO4L95I35B", [])
+        clientes_linked     = f.get("Clientes", [])
         cliente_airtable_id = clientes_linked[0] if clientes_linked else None
         cliente_id          = cliente_map.get(cliente_airtable_id) if cliente_airtable_id else None
 
-        cat_mktg = f.get("fldjcu0hTbdheUxWl")
-        if isinstance(cat_mktg, str):
-            cat_mktg = [cat_mktg]
-
         rows.append({
             "airtable_id":         r["id"],
-            "nombre":              f.get("fld8nAMWfKfipMgv8") or "",
-            "apellido":            f.get("fldaHcADHxSUcw1Rr"),
-            "email":               f.get("fldmXti9SGuGbJzG8"),
-            "telefono":            f.get("fldI77R8ZfWirYcaW"),
-            "rol":                 f.get("fldL4YpgoTrg05o6S"),
-            "vertical":            f.get("fldZFEk1ZJGrv9fVp"),
-            "pais":                f.get("fldJ5nbAQ0jt8YxZp"),
-            "tipo":                f.get("fld6awZ2suNeeFDCg"),
-            "rating_persona":      f.get("fld1SvyIEiwlfy7N5"),
-            "categoria_marketing": cat_mktg,
-            "notas":               f.get("fldl0r9btzeqLybTE"),
+            "nombre":              f.get("Nombre") or "",
+            "apellido":            f.get("Apellido"),
+            "email":               f.get("Correo"),
+            "telefono":            f.get("Número de teléfono"),
+            "rol":                 f.get("Rol"),
+            "vertical":            f.get("Vertical"),
+            "pais":                f.get("País"),
+            "tipo":                f.get("Tipo"),
+            "rating_persona":      None,   # no existe en Airtable, se setea manualmente en Supabase
+            "categoria_marketing": None,   # ídem
+            "notas":               f.get("Notas"),
             "cliente_id":          cliente_id,
             "synced_at":           now_iso(),
             "updated_at":          now_iso(),
