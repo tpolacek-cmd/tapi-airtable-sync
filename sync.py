@@ -68,7 +68,7 @@ def supabase_upsert(table: str, rows: list[dict]) -> int:
     if not rows:
         return 0
 
-    # Supabase upsert: POST con ?on_conflict=airtable_id y Prefer: resolution=merge-duplicates
+    # Supabase upsert correcto: PUT (no POST) con ?on_conflict y Prefer: resolution=merge-duplicates
     BATCH = 500
     total = 0
     headers = {
@@ -78,8 +78,8 @@ def supabase_upsert(table: str, rows: list[dict]) -> int:
     for i in range(0, len(rows), BATCH):
         batch = rows[i : i + BATCH]
         url  = f"{SUPABASE_URL}/rest/v1/{table}?on_conflict=airtable_id"
-        resp = requests.post(url, headers=headers, json=batch)
-        if resp.status_code not in (200, 201):
+        resp = requests.put(url, headers=headers, json=batch)
+        if resp.status_code not in (200, 201, 204):
             log.error(f"  Supabase error en {table}: {resp.status_code} {resp.text[:300]}")
             resp.raise_for_status()
         total += len(batch)
