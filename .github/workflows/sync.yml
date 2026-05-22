@@ -5,6 +5,10 @@ on:
     - cron: "*/15 * * * *"   # cada 15 minutos
   workflow_dispatch:          # permite correrlo manualmente desde GitHub
 
+concurrency:
+  group: airtable-sync        # solo 1 run a la vez; la nueva espera a que termine la anterior
+  cancel-in-progress: false
+
 jobs:
   sync:
     runs-on: ubuntu-latest

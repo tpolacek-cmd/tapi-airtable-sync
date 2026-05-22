@@ -63,24 +63,47 @@ def airtable_get_all(table_id: str, fields: list[str]) -> list[dict]:
     return records
 
 
+def supabase_count(table: str) -> int:
+    """Returns current row count for a table via HEAD + Content-Range."""
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    headers = {
+        "apikey":        SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Prefer":        "count=exact",
+    }
+    resp = requests.head(url, headers=headers, params={"select": "id"})
+    cr = resp.headers.get("Content-Range", "*/0")
+    try:
+        return int(cr.split("/")[-1])
+    except (ValueError, IndexError):
+        return -1
+
+
 def supabase_delete_all(table: str) -> None:
     """Borra todos los registros de la tabla antes de reinsertar."""
-    # PostgREST: IS NOT NULL = not.is.null  (neq.null compara contra el string "null")
+    before = supabase_count(table)
+    log.info(f"  [DELETE] {table}: {before} rows currently in table")
+
+    # Use id=not.is.null — the auto PK is always set, so this matches ALL rows.
+    # (airtable_id=not.is.null would miss rows added without an airtable_id)
     url = f"{SUPABASE_URL}/rest/v1/{table}"
     headers = {
         "apikey":        SUPABASE_SERVICE_KEY,
         "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
         "Content-Type":  "application/json",
-        "Prefer":        "return=minimal,count=exact",
+        "Prefer":        "return=minimal",
     }
-    params = {"airtable_id": "not.is.null"}
-    log.info(f"  [DELETE] {table} WHERE airtable_id IS NOT NULL ...")
+    params = {"id": "not.is.null"}
     resp = requests.delete(url, headers=headers, params=params)
-    log.info(f"  [DELETE] status={resp.status_code} | Content-Range: {resp.headers.get('Content-Range', 'n/a')}")
+    log.info(f"  [DELETE] status={resp.status_code}")
     if resp.status_code not in (200, 204):
         log.error(f"  Supabase delete error en {table}: {resp.status_code} {resp.text[:300]}")
         resp.raise_for_status()
-    log.info(f"  [DELETE] {table}: OK")
+
+    after = supabase_count(table)
+    log.info(f"  [DELETE] {table}: {after} rows remain after delete (deleted {before - after})")
+    if after > 0:
+        raise RuntimeError(f"Delete incomplete: {after} rows still exist in {table} after delete")
 
 
 def supabase_insert(table: str, rows: list[dict]) -> int:
