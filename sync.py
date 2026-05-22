@@ -63,20 +63,25 @@ def airtable_get_all(table_id: str, fields: list[str]) -> list[dict]:
     return records
 
 
-def supabase_upsert(table: str, rows: list[dict]) -> int:
-    """Hace upsert en Supabase usando airtable_id como clave. Devuelve cantidad de filas procesadas."""
+def supabase_delete_all(table: str) -> None:
+    """Borra todos los registros de la tabla antes de reinsertar."""
+    url  = f"{SUPABASE_URL}/rest/v1/{table}?airtable_id=neq.null"
+    headers = {**SUPABASE_HEADERS, "Prefer": "return=minimal"}
+    resp = requests.delete(url, headers=headers)
+    if resp.status_code not in (200, 204):
+        log.error(f"  Supabase delete error en {table}: {resp.status_code} {resp.text[:200]}")
+        resp.raise_for_status()
+    log.info(f"  Supabase {table}: registros anteriores borrados")
+
+
+def supabase_insert(table: str, rows: list[dict]) -> int:
+    """Inserta filas en Supabase en batches. Devuelve cantidad de filas insertadas."""
     if not rows:
         return 0
 
-    # Supabase upsert correcto: POST con Prefer: resolution=merge-duplicates
-    # PostgREST infiere la columna de conflicto desde el UNIQUE constraint (airtable_id)
-    # No se usa ?on_conflict ni PUT — ambos causan 409 en versiones recientes de PostgREST
     BATCH = 500
     total = 0
-    headers = {
-        **SUPABASE_HEADERS,
-        "Prefer": "resolution=merge-duplicates,return=minimal",
-    }
+    headers = {**SUPABASE_HEADERS, "Prefer": "return=minimal"}
     for i in range(0, len(rows), BATCH):
         batch = rows[i : i + BATCH]
         url  = f"{SUPABASE_URL}/rest/v1/{table}"
@@ -86,7 +91,7 @@ def supabase_upsert(table: str, rows: list[dict]) -> int:
             resp.raise_for_status()
         total += len(batch)
 
-    log.info(f"  Supabase {table}: {total} filas upserted")
+    log.info(f"  Supabase {table}: {total} filas insertadas")
     return total
 
 
@@ -127,7 +132,8 @@ def sync_clientes():
             "updated_at":          now_iso(),
         })
 
-    return supabase_upsert("bizdev_clientes", rows)
+    supabase_delete_all("bizdev_clientes")
+    return supabase_insert("bizdev_clientes", rows)
 
 
 # ── Sync contactos (Contactos BizDev → bizdev_contactos) ──────────────────────
@@ -200,7 +206,8 @@ def sync_contactos(cliente_map: dict[str, str]):
             "updated_at":          now_iso(),
         })
 
-    return supabase_upsert("bizdev_contactos", rows)
+    supabase_delete_all("bizdev_contactos")
+    return supabase_insert("bizdev_contactos", rows)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
