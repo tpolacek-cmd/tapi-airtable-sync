@@ -144,11 +144,21 @@ def build_cliente_map() -> dict[str, str]:
 def sync_contactos(cliente_map: dict[str, str]):
     log.info("── Sync contactos ──")
 
+    # Usamos field IDs para evitar problemas con caracteres especiales en nombres
+    # (Número, Categoría, etc. rompen los query params de la API de Airtable)
     fields = [
-        "Nombre", "Apellido", "Correo", "Número de teléfono", "Rol",
-        "Vertical", "Pais", "Tipo", "Rating Persona",
-        "Categoría Marketing", "Notas",
-        "Clientes",   # linked record → airtable_id del cliente
+        "fld8nAMWfKfipMgv8",  # Nombre
+        "fldaHcADHxSUcw1Rr",  # Apellido
+        "fldmXti9SGuGbJzG8",  # Correo
+        "fldI77R8ZfWirYcaW",  # Número de teléfono
+        "fldL4YpgoTrg05o6S",  # Rol
+        "fldZFEk1ZJGrv9fVp",  # Vertical
+        "fldJ5nbAQ0jt8YxZp",  # Pais
+        "fld6awZ2suNeeFDCg",  # Tipo
+        "fld1SvyIEiwlfy7N5",  # Rating Persona
+        "fldjcu0hTbdheUxWl",  # Categoría Marketing
+        "fldl0r9btzeqLybTE",  # Notas
+        "fldYIs7UO4L95I35B",  # Clientes (linked record)
     ]
     records = airtable_get_all(TABLE_CONTACTOS, fields)
 
@@ -157,31 +167,31 @@ def sync_contactos(cliente_map: dict[str, str]):
         f = r.get("fields", {})
 
         # Resolver cliente_id: tomar el primer linked record y mapear a UUID de Supabase
-        clientes_linked = f.get("Clientes", [])
+        clientes_linked = f.get("fldYIs7UO4L95I35B", [])  # Clientes (linked record)
         cliente_airtable_id = clientes_linked[0] if clientes_linked else None
         cliente_id = cliente_map.get(cliente_airtable_id) if cliente_airtable_id else None
 
         # categoria_marketing es multiselect en Airtable → array en Supabase
-        cat_mktg = f.get("Categoría Marketing")
+        cat_mktg = f.get("fldjcu0hTbdheUxWl")  # Categoría Marketing
         if isinstance(cat_mktg, str):
             cat_mktg = [cat_mktg]
 
         rows.append({
-            "airtable_id":        r["id"],
-            "nombre":             f.get("Nombre") or "",
-            "apellido":           f.get("Apellido"),
-            "email":              f.get("Correo"),
-            "telefono":           f.get("Número de teléfono"),
-            "rol":                f.get("Rol"),
-            "vertical":           f.get("Vertical"),
-            "pais":               f.get("Pais"),
-            "tipo":               f.get("Tipo"),
-            "rating_persona":     f.get("Rating Persona"),   # A / B / C
+            "airtable_id":         r["id"],
+            "nombre":              f.get("fld8nAMWfKfipMgv8") or "",  # Nombre
+            "apellido":            f.get("fldaHcADHxSUcw1Rr"),        # Apellido
+            "email":               f.get("fldmXti9SGuGbJzG8"),        # Correo
+            "telefono":            f.get("fldI77R8ZfWirYcaW"),        # Número de teléfono
+            "rol":                 f.get("fldL4YpgoTrg05o6S"),        # Rol
+            "vertical":            f.get("fldZFEk1ZJGrv9fVp"),        # Vertical
+            "pais":                f.get("fldJ5nbAQ0jt8YxZp"),        # Pais
+            "tipo":                f.get("fld6awZ2suNeeFDCg"),        # Tipo
+            "rating_persona":      f.get("fld1SvyIEiwlfy7N5"),        # Rating Persona
             "categoria_marketing": cat_mktg,
-            "notas":              f.get("Notas"),
-            "cliente_id":         cliente_id,
-            "synced_at":          now_iso(),
-            "updated_at":         now_iso(),
+            "notas":               f.get("fldl0r9btzeqLybTE"),        # Notas
+            "cliente_id":          cliente_id,
+            "synced_at":           now_iso(),
+            "updated_at":          now_iso(),
         })
 
     return supabase_upsert("bizdev_contactos", rows)
