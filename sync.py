@@ -60,8 +60,8 @@ def _jwt_role(token: str) -> str:
 
 def startup_check():
     role = _jwt_role(SUPABASE_SERVICE_KEY)
-    log.info(f"  Supabase URL : {SUPABASE_URL}")
-    log.info(f"  JWT role     : {role}")
+    log.warning(f"  Supabase URL : {SUPABASE_URL}")
+    log.warning(f"  JWT role     : {role}")
     if role != "service_role":
         log.error(f"FATAL: JWT role is '{role}', expected 'service_role'. Check GitHub Secret SUPABASE_SERVICE_KEY.")
         sys.exit(1)
@@ -78,37 +78,39 @@ def supabase_count(table: str) -> int:
         params={"select": "id", "limit": "1"},
     )
     cr = resp.headers.get("Content-Range", "")
-    log.info(f"  supabase_count({table}): status={resp.status_code} Content-Range={cr!r}")
+    log.warning(f"  [COUNT] {table}: HTTP {resp.status_code} Content-Range={cr!r}")
     if resp.ok and "/" in cr:
         total_str = cr.split("/")[-1]
         if total_str.isdigit():
             return int(total_str)
     # Fallback: fetch all IDs and count in Python
-    log.info(f"  supabase_count({table}): falling back to full-ID fetch")
+    log.warning(f"  [COUNT] {table}: no Content-Range — falling back to full-ID fetch")
     resp2 = requests.get(url, headers=_sb_headers(), params={"select": "id", "limit": "10000"})
     if resp2.ok:
-        return len(resp2.json())
-    log.error(f"  supabase_count fallback failed: {resp2.status_code} {resp2.text[:100]}")
+        n = len(resp2.json())
+        log.warning(f"  [COUNT] {table}: fallback returned {n} rows")
+        return n
+    log.error(f"  [COUNT] fallback failed: {resp2.status_code} {resp2.text[:100]}")
     return -1
 
 
 def supabase_delete_all(table: str) -> None:
     """Delete every row in table, then verify count == 0."""
     before = supabase_count(table)
-    log.info(f"  [DELETE] {table}: {before} rows before delete")
+    log.warning(f"  [DELETE] {table}: {before} rows before delete")
 
     # Embed filter in URL to avoid any requests-param encoding ambiguity.
     # airtable_id IS NOT NULL covers every synced row (schema: airtable_id NOT NULL).
     url  = f"{SUPABASE_URL}/rest/v1/{table}?airtable_id=not.is.null"
     resp = requests.delete(url, headers=_sb_headers({"Prefer": "return=minimal"}))
-    log.info(f"  [DELETE] HTTP {resp.status_code} | body={resp.text[:200]!r}")
+    log.warning(f"  [DELETE] HTTP {resp.status_code} | body={resp.text[:200]!r}")
 
     if resp.status_code not in (200, 204):
         log.error(f"  [DELETE] FAILED {table}: {resp.status_code} {resp.text[:300]}")
         resp.raise_for_status()
 
     after = supabase_count(table)
-    log.info(f"  [DELETE] {table}: {after} rows after delete")
+    log.warning(f"  [DELETE] {table}: {after} rows after delete (cleared {before - after})")
 
     if after != 0:
         log.error(f"  [DELETE] FATAL: {after} rows still in {table} after delete. Aborting insert.")

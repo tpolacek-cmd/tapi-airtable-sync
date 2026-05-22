@@ -27,6 +27,13 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
+      - name: Verify sync.py
+        run: |
+          echo "=== sync.py SHA256 ==="
+          sha256sum sync.py
+          echo "=== sync.py first 20 lines ==="
+          head -20 sync.py
+
       - name: Run sync
         env:
           AIRTABLE_TOKEN:       ${{ secrets.AIRTABLE_TOKEN }}
