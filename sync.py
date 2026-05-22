@@ -4,6 +4,8 @@ Sincroniza Contactos BizDev y CRM (clientes) de Airtable a Supabase.
 Corre cada 15 minutos via GitHub Actions.
 """
 
+import base64
+import json
 import os
 import sys
 import logging
@@ -19,32 +21,131 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Credenciales (desde env vars / GitHub Secrets) ────────────────────────────
-AIRTABLE_TOKEN      = os.environ["AIRTABLE_TOKEN"]       # Personal Access Token de Airtable
-AIRTABLE_BASE_ID    = os.environ["AIRTABLE_BASE_ID"]     # appHeFqYDGYDUJVbt
-SUPABASE_URL        = os.environ["SUPABASE_URL"]         # https://rqowrsfbkcpuzfbpsljw.supabase.co
-SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"] # JWT service_role (legacy)
+AIRTABLE_TOKEN       = os.environ["AIRTABLE_TOKEN"]
+AIRTABLE_BASE_ID     = os.environ["AIRTABLE_BASE_ID"]
+SUPABASE_URL         = os.environ["SUPABASE_URL"].rstrip("/")
+SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
 # ── IDs de tablas Airtable ─────────────────────────────────────────────────────
-TABLE_CONTACTOS = "tbl9elB9e34E5AdUD"   # Contactos BizDev
-TABLE_CRM       = "tblb7D95sZFtSkBCn"   # CRM (clientes)
+TABLE_CONTACTOS = "tbl9elB9e34E5AdUD"
+TABLE_CRM       = "tblb7D95sZFtSkBCn"
 
 # ── Headers ────────────────────────────────────────────────────────────────────
 AIRTABLE_HEADERS = {
     "Authorization": f"Bearer {AIRTABLE_TOKEN}",
     "Content-Type":  "application/json",
 }
-SUPABASE_HEADERS = {
-    "apikey":        SUPABASE_SERVICE_KEY,
-    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-    "Content-Type":  "application/json",
-    "Prefer":        "resolution=merge-duplicates",  # upsert
-}
+
+def _sb_headers(extra: dict | None = None) -> dict:
+    h = {
+        "apikey":        SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type":  "application/json",
+    }
+    if extra:
+        h.update(extra)
+    return h
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Diagnostics ────────────────────────────────────────────────────────────────
+
+def _jwt_role(token: str) -> str:
+    try:
+        payload_b64 = token.split(".")[1]
+        padded = payload_b64 + "=" * (4 - len(payload_b64) % 4)
+        return json.loads(base64.b64decode(padded)).get("role", "unknown")
+    except Exception:
+        return "parse-error"
+
+
+def startup_check():
+    role = _jwt_role(SUPABASE_SERVICE_KEY)
+    log.info(f"  Supabase URL : {SUPABASE_URL}")
+    log.info(f"  JWT role     : {role}")
+    if role != "service_role":
+        log.error(f"FATAL: JWT role is '{role}', expected 'service_role'. Check GitHub Secret SUPABASE_SERVICE_KEY.")
+        sys.exit(1)
+
+
+# ── Supabase helpers ───────────────────────────────────────────────────────────
+
+def supabase_count(table: str) -> int:
+    """Row count via GET with count=exact. Falls back to full-fetch if no Content-Range."""
+    url  = f"{SUPABASE_URL}/rest/v1/{table}"
+    resp = requests.get(
+        url,
+        headers=_sb_headers({"Prefer": "count=exact"}),
+        params={"select": "id", "limit": "1"},
+    )
+    cr = resp.headers.get("Content-Range", "")
+    log.info(f"  supabase_count({table}): status={resp.status_code} Content-Range={cr!r}")
+    if resp.ok and "/" in cr:
+        total_str = cr.split("/")[-1]
+        if total_str.isdigit():
+            return int(total_str)
+    # Fallback: fetch all IDs and count in Python
+    log.info(f"  supabase_count({table}): falling back to full-ID fetch")
+    resp2 = requests.get(url, headers=_sb_headers(), params={"select": "id", "limit": "10000"})
+    if resp2.ok:
+        return len(resp2.json())
+    log.error(f"  supabase_count fallback failed: {resp2.status_code} {resp2.text[:100]}")
+    return -1
+
+
+def supabase_delete_all(table: str) -> None:
+    """Delete every row in table, then verify count == 0."""
+    before = supabase_count(table)
+    log.info(f"  [DELETE] {table}: {before} rows before delete")
+
+    # Embed filter in URL to avoid any requests-param encoding ambiguity.
+    # airtable_id IS NOT NULL covers every synced row (schema: airtable_id NOT NULL).
+    url  = f"{SUPABASE_URL}/rest/v1/{table}?airtable_id=not.is.null"
+    resp = requests.delete(url, headers=_sb_headers({"Prefer": "return=minimal"}))
+    log.info(f"  [DELETE] HTTP {resp.status_code} | body={resp.text[:200]!r}")
+
+    if resp.status_code not in (200, 204):
+        log.error(f"  [DELETE] FAILED {table}: {resp.status_code} {resp.text[:300]}")
+        resp.raise_for_status()
+
+    after = supabase_count(table)
+    log.info(f"  [DELETE] {table}: {after} rows after delete")
+
+    if after != 0:
+        log.error(f"  [DELETE] FATAL: {after} rows still in {table} after delete. Aborting insert.")
+        raise RuntimeError(f"Delete verification failed: {after} rows remain in {table}")
+
+    log.info(f"  [DELETE] {table}: OK — cleared {before} rows")
+
+
+def supabase_insert(table: str, rows: list[dict]) -> int:
+    """Plain INSERT in batches of 500. Returns total rows inserted."""
+    if not rows:
+        return 0
+
+    BATCH   = 500
+    total   = 0
+    headers = _sb_headers({"Prefer": "return=minimal"})
+
+    for i in range(0, len(rows), BATCH):
+        batch = rows[i : i + BATCH]
+        resp  = requests.post(f"{SUPABASE_URL}/rest/v1/{table}", headers=headers, json=batch)
+        if resp.status_code not in (200, 201, 204):
+            log.error(f"  Supabase error en {table}: {resp.status_code} {resp.text[:300]}")
+            resp.raise_for_status()
+        total += len(batch)
+        log.info(f"  Supabase {table}: inserted batch {i//BATCH + 1} ({len(batch)} rows)")
+
+    log.info(f"  Supabase {table}: {total} filas insertadas OK")
+    return total
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ── Airtable helper ────────────────────────────────────────────────────────────
 
 def airtable_get_all(table_id: str, fields: list[str]) -> list[dict]:
-    """Lee todos los registros de una tabla de Airtable (maneja paginación)."""
     url     = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{table_id}"
     records = []
     params  = {"fields[]": fields, "pageSize": 100}
@@ -63,77 +164,9 @@ def airtable_get_all(table_id: str, fields: list[str]) -> list[dict]:
     return records
 
 
-def supabase_count(table: str) -> int:
-    """Returns current row count for a table via HEAD + Content-Range."""
-    url = f"{SUPABASE_URL}/rest/v1/{table}"
-    headers = {
-        "apikey":        SUPABASE_SERVICE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-        "Prefer":        "count=exact",
-    }
-    resp = requests.head(url, headers=headers, params={"select": "id"})
-    cr = resp.headers.get("Content-Range", "*/0")
-    try:
-        return int(cr.split("/")[-1])
-    except (ValueError, IndexError):
-        return -1
+# ── Sync clientes ──────────────────────────────────────────────────────────────
 
-
-def supabase_delete_all(table: str) -> None:
-    """Borra todos los registros de la tabla antes de reinsertar."""
-    before = supabase_count(table)
-    log.info(f"  [DELETE] {table}: {before} rows currently in table")
-
-    # Use id=not.is.null — the auto PK is always set, so this matches ALL rows.
-    # (airtable_id=not.is.null would miss rows added without an airtable_id)
-    url = f"{SUPABASE_URL}/rest/v1/{table}"
-    headers = {
-        "apikey":        SUPABASE_SERVICE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-        "Content-Type":  "application/json",
-        "Prefer":        "return=minimal",
-    }
-    params = {"id": "not.is.null"}
-    resp = requests.delete(url, headers=headers, params=params)
-    log.info(f"  [DELETE] status={resp.status_code}")
-    if resp.status_code not in (200, 204):
-        log.error(f"  Supabase delete error en {table}: {resp.status_code} {resp.text[:300]}")
-        resp.raise_for_status()
-
-    after = supabase_count(table)
-    log.info(f"  [DELETE] {table}: {after} rows remain after delete (deleted {before - after})")
-    if after > 0:
-        raise RuntimeError(f"Delete incomplete: {after} rows still exist in {table} after delete")
-
-
-def supabase_insert(table: str, rows: list[dict]) -> int:
-    """Inserta filas en Supabase en batches. Devuelve cantidad de filas insertadas."""
-    if not rows:
-        return 0
-
-    BATCH = 500
-    total = 0
-    headers = {**SUPABASE_HEADERS, "Prefer": "return=minimal"}
-    for i in range(0, len(rows), BATCH):
-        batch = rows[i : i + BATCH]
-        url  = f"{SUPABASE_URL}/rest/v1/{table}"
-        resp = requests.post(url, headers=headers, json=batch)
-        if resp.status_code not in (200, 201, 204):
-            log.error(f"  Supabase error en {table}: {resp.status_code} {resp.text[:300]}")
-            resp.raise_for_status()
-        total += len(batch)
-
-    log.info(f"  Supabase {table}: {total} filas insertadas")
-    return total
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-# ── Sync clientes (CRM → bizdev_clientes) ─────────────────────────────────────
-
-def sync_clientes():
+def sync_clientes() -> int:
     log.info("── Sync clientes ──")
 
     fields = [
@@ -168,28 +201,22 @@ def sync_clientes():
     return supabase_insert("bizdev_clientes", rows)
 
 
-# ── Sync contactos (Contactos BizDev → bizdev_contactos) ──────────────────────
+# ── Sync contactos ─────────────────────────────────────────────────────────────
 
 def build_cliente_map() -> dict[str, str]:
-    """
-    Devuelve un dict {airtable_record_id → supabase_uuid} para bizdev_clientes.
-    Necesario para setear cliente_id en cada contacto.
-    """
     url  = f"{SUPABASE_URL}/rest/v1/bizdev_clientes"
     resp = requests.get(
         url,
-        headers={**SUPABASE_HEADERS, "Prefer": ""},
+        headers=_sb_headers(),
         params={"select": "id,airtable_id", "limit": 5000},
     )
     resp.raise_for_status()
     return {row["airtable_id"]: row["id"] for row in resp.json()}
 
 
-def sync_contactos(cliente_map: dict[str, str]):
+def sync_contactos(cliente_map: dict[str, str]) -> int:
     log.info("── Sync contactos ──")
 
-    # Usamos field IDs para evitar problemas con caracteres especiales en nombres
-    # (Número, Categoría, etc. rompen los query params de la API de Airtable)
     fields = [
         "fld8nAMWfKfipMgv8",  # Nombre
         "fldaHcADHxSUcw1Rr",  # Apellido
@@ -210,29 +237,27 @@ def sync_contactos(cliente_map: dict[str, str]):
     for r in records:
         f = r.get("fields", {})
 
-        # Resolver cliente_id: tomar el primer linked record y mapear a UUID de Supabase
-        clientes_linked = f.get("fldYIs7UO4L95I35B", [])  # Clientes (linked record)
+        clientes_linked     = f.get("fldYIs7UO4L95I35B", [])
         cliente_airtable_id = clientes_linked[0] if clientes_linked else None
-        cliente_id = cliente_map.get(cliente_airtable_id) if cliente_airtable_id else None
+        cliente_id          = cliente_map.get(cliente_airtable_id) if cliente_airtable_id else None
 
-        # categoria_marketing es multiselect en Airtable → array en Supabase
-        cat_mktg = f.get("fldjcu0hTbdheUxWl")  # Categoría Marketing
+        cat_mktg = f.get("fldjcu0hTbdheUxWl")
         if isinstance(cat_mktg, str):
             cat_mktg = [cat_mktg]
 
         rows.append({
             "airtable_id":         r["id"],
-            "nombre":              f.get("fld8nAMWfKfipMgv8") or "",  # Nombre
-            "apellido":            f.get("fldaHcADHxSUcw1Rr"),        # Apellido
-            "email":               f.get("fldmXti9SGuGbJzG8"),        # Correo
-            "telefono":            f.get("fldI77R8ZfWirYcaW"),        # Número de teléfono
-            "rol":                 f.get("fldL4YpgoTrg05o6S"),        # Rol
-            "vertical":            f.get("fldZFEk1ZJGrv9fVp"),        # Vertical
-            "pais":                f.get("fldJ5nbAQ0jt8YxZp"),        # Pais
-            "tipo":                f.get("fld6awZ2suNeeFDCg"),        # Tipo
-            "rating_persona":      f.get("fld1SvyIEiwlfy7N5"),        # Rating Persona
+            "nombre":              f.get("fld8nAMWfKfipMgv8") or "",
+            "apellido":            f.get("fldaHcADHxSUcw1Rr"),
+            "email":               f.get("fldmXti9SGuGbJzG8"),
+            "telefono":            f.get("fldI77R8ZfWirYcaW"),
+            "rol":                 f.get("fldL4YpgoTrg05o6S"),
+            "vertical":            f.get("fldZFEk1ZJGrv9fVp"),
+            "pais":                f.get("fldJ5nbAQ0jt8YxZp"),
+            "tipo":                f.get("fld6awZ2suNeeFDCg"),
+            "rating_persona":      f.get("fld1SvyIEiwlfy7N5"),
             "categoria_marketing": cat_mktg,
-            "notas":               f.get("fldl0r9btzeqLybTE"),        # Notas
+            "notas":               f.get("fldl0r9btzeqLybTE"),
             "cliente_id":          cliente_id,
             "synced_at":           now_iso(),
             "updated_at":          now_iso(),
@@ -246,6 +271,7 @@ def sync_contactos(cliente_map: dict[str, str]):
 
 def main():
     log.info(f"=== TAPI Airtable→Supabase Sync — {now_iso()} ===")
+    startup_check()
 
     try:
         n_clientes  = sync_clientes()
